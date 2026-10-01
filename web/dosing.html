@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BioTreat 加药配方</title><link rel="stylesheet" href="/assets/app.css"></head>
+<body>
+<header><div class="brand">BioTreat 工艺联控</div><nav><a href="/process">工艺总控</a><a href="/aeration">曝气调节</a><a href="/sludge">污泥回流</a><a aria-current="page" href="/dosing">加药配方</a><a href="/alarms">异常处置</a></nav></header>
+<main>
+  <div class="page-head"><div><h1>加药配方与投加建议</h1><div class="muted">按进水来源、流量、处理阶段和最近有效 COD 在线样本计算速率；操作员确认后才下发</div></div><div class="status"><span class="dot"></span><span id="health">checking</span></div></div>
+  <div class="grid">
+    <section class="panel wide">
+      <h2>投加速率建议</h2>
+      <form id="pick" style="grid-template-columns:1fr 1fr auto;align-items:end">
+        <label>处理线<select name="line"><option>line-1</option><option>line-2</option><option>line-3</option></select></label>
+        <label>确认操作员<input name="operator" value="operator"></label>
+        <button type="button" id="refresh">刷新</button>
+      </form>
+      <div class="rows" id="context" style="margin-top:12px"></div>
+      <div style="display:flex;gap:8px;margin:12px 0">
+        <button type="button" id="preview">仅预览建议</button>
+        <button type="button" id="generate">生成建议</button>
+        <button type="button" id="confirm" class="danger">确认并下发</button>
+      </div>
+      <div id="suggestion"></div>
+      <div id="reasons" style="display:none;margin-top:10px"></div>
+    </section>
+    <section class="panel">
+      <h2>发布配方版本</h2>
+      <form id="publish">
+        <label>进水来源<input name="source" value="north-intake"></label>
+        <label>处理阶段<select name="stage"><option value="receiving">receiving</option><option value="equalizing">equalizing</option><option value="biological" selected>biological</option><option value="settling">settling</option><option value="qualified">qualified</option><option value="discharging">discharging</option></select></label>
+        <label>药剂<input name="chemical" value="pac"></label>
+        <label>单位 COD 投加系数<input name="dose" type="number" step="0.001" min="0.001" value="0.002"></label>
+        <label>COD 样本有效期（秒）<input name="maxage" type="number" min="60" value="1800"></label>
+        <label>最小速率 L/h<input name="minrate" type="number" step="0.1" min="0" value="10"></label>
+        <label>最大速率 L/h<input name="maxrate" type="number" step="0.1" min="0.1" value="500"></label>
+        <label>备注<input name="note" value=""></label>
+        <button>发布新版本</button>
+      </form>
+      <pre id="output">等待操作</pre>
+    </section>
+    <section class="panel wide"><h2>当前有效配方</h2><table><thead><tr><th>来源</th><th>阶段</th><th>药剂</th><th>版本</th><th>系数</th><th>速率范围</th><th>样本有效期</th><th>生效时间</th></tr></thead><tbody id="recipes"></tbody></table></section>
+    <section class="panel wide"><h2>建议历史（配方更新不改写历史）</h2><table><thead><tr><th>生成时间</th><th>线/批次</th><th>来源/阶段</th><th>配方版本</th><th>药剂</th><th>建议速率</th><th>COD 依据</th><th>状态</th><th>命令</th></tr></thead><tbody id="history"></tbody></table></section>
+  </div>
+</main>
+<script src="/assets/common.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+const short = v => v ? String(v).slice(0,8) : "-";
+const fmtTime = v => v ? new Date(v).toLocaleString() : "-";
+const esc = v => String(v ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const STATUS_TEXT = {pending:"待确认",failed:"下发失败可重试",confirmed:"已确认下发",blocked:"条件不满足",superseded:"已被新建议作"};
+
+function lineId(){ return new FormData($('#pick')).get('line'); }
+
+async function loadContext(){
+  const status = await request(`/api/process-lines/${lineId()}`);
+  const b = status.batch, inb = status.intake;
+  const cod = (status.samples||[]).filter(x => x.kind === "cod").pop();
+  $('#context').innerHTML = [
+    ["活跃批次", b ? `${short(b.id)}（${b.stage}）` : "无"],
+    ["进水来源 / 流量", inb ? `${esc(inb.source)} / ${inb.flow_m3_hour} m³/h` : "未登记"],
+    ["最近 COD 在线样本", cod ? `${cod.value} ${esc(cod.unit||"")}（序号 ${cod.sequence}，${fmtTime(cod.observed_at)}）` : "无"],
+  ].map(([k,v]) => `<div class="row"><span class="muted">${k}</span><strong>${v}</strong></div>`).join("");
+  return status;
+}
+
+function renderReasons(reasons){
+  if(!reasons || !reasons.length){ $('#reasons').style.display = "none"; return; }
+  $('#reasons').style.display = "block";
+  $('#reasons').innerHTML = `<div class="muted" style="margin-bottom:6px">条件不满足，未下发任何命令：</div>` +
+    `<ul>${reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>`;
+}
+
+function renderSuggestion(s){
+  $('#reasons').style.display = "none";
+  if(!s){ $('#suggestion').innerHTML = `<p class="muted">当前批次没有可确认的建议，请先生成。</p>`; return; }
+  const basis = s.basis ? `${s.basis.value} mg/L，采样于 ${fmtTime(s.basis.observed_at)}（${s.basis.age_seconds}s 前）` : "-";
+  const clamp = s.clamped ? `（触及${s.clamped === "min" ? "最小" : "最大"}限值，原始 ${s.raw_rate.toFixed(2)}）` : "";
+  $('#suggestion').innerHTML = `<div class="rows">
+    <div class="row"><span class="muted">建议编号 / 状态</span><strong>${short(s.id)} / ${STATUS_TEXT[s.status]||s.status}${s.fail_reason ? "："+esc(s.fail_reason) : ""}</strong></div>
+    <div class="row"><span class="muted">配方版本</span><strong>v${s.recipe_version}（${esc(s.chemical)}）</strong></div>
+    <div class="row"><span class="muted">建议速率</span><strong>${s.rate.toFixed(2)} L/h ${clamp}</strong></div>
+    <div class="row"><span class="muted">COD 依据</span><strong>${basis}</strong></div>
+    ${s.command_id ? `<div class="row"><span class="muted">设备命令</span><strong>${short(s.command_id)}</strong></div>` : ""}
+  </div>`;
+  $('#confirm').dataset.id = (s.status === "pending" || s.status === "failed") ? s.id : "";
+}
+
+async function loadRecipes(){
+  const data = await request('/api/dosing/recipes');
+  $('#recipes').innerHTML = (data.active||[]).map(r => `<tr><td>${esc(r.source)}</td><td>${r.stage}</td><td>${esc(r.chemical)}</td><td>v${r.version}</td><td>${r.dose_per_cod}</td><td>${r.min_rate} ~ ${r.max_rate} L/h</td><td>${Math.round(r.sample_max_age/1e9)}s</td><td>${fmtTime(r.created_at)}</td></tr>`).join("")
+    || `<tr><td colspan="8" class="muted">尚无有效配方</td></tr>`;
+}
+
+async function loadHistory(){
+  const data = await request(`/api/dosing/suggestions?line_id=${encodeURIComponent(lineId())}`);
+  $('#history').innerHTML = (data.suggestions||[]).map(s => `<tr>
+    <td>${fmtTime(s.created_at)}</td><td>${s.line_id}/${short(s.batch_id)}</td><td>${esc(s.source)}/${s.stage}</td>
+    <td>v${s.recipe_version||"-"}</td><td>${esc(s.chemical||"-")}</td>
+    <td>${s.rate ? s.rate.toFixed(2) : "-"}</td>
+    <td>${s.basis ? s.basis.value+"@"+fmtTime(s.basis.observed_at) : (s.reasons&&s.reasons.length ? "无可信样本" : "-")}</td>
+    <td>${STATUS_TEXT[s.status]||s.status}</td><td>${short(s.command_id)}</td></tr>`).join("")
+    || `<tr><td colspan="9" class="muted">暂无建议</td></tr>`;
+}
+
+async function currentSuggestion(){
+  const data = await request(`/api/dosing/suggestions?line_id=${encodeURIComponent(lineId())}`);
+  return (data.suggestions||[]).find(s => s.status==="pending" || s.status==="failed") || null;
+}
+
+async function refreshAll(){ try{ await loadContext(); const s = await currentSuggestion(); renderSuggestion(s); await loadHistory(); renderReasons(null);}catch(e){showError(e);} }
+
+$('#refresh').addEventListener('click', refreshAll);
+$('#pick').addEventListener('change', refreshAll);
+
+$('#preview').addEventListener('click', async () => {
+  try{
+    const outcome = await request(`/api/process-lines/${lineId()}/dosing-suggestion/preview`);
+    renderSuggestion(outcome.deliverable ? outcome.suggestion : null);
+    renderReasons(outcome.suggestion.reasons);
+  }catch(e){ showError(e); }
+});
+
+$('#generate').addEventListener('click', async () => {
+  try{
+    const s = await request(`/api/process-lines/${lineId()}/dosing-suggestions`, {method:"POST"});
+    show({generated:s.id, rate:s.rate, status:s.status});
+    await refreshAll();
+  }catch(e){
+    if(e.status === 422 && e.data && e.data.suggestion){ renderSuggestion(null); renderReasons(e.data.suggestion.reasons); show({blocked:true, reasons:e.data.suggestion.reasons}); }
+    else showError(e);
+  }
+});
+
+$('#confirm').addEventListener('click', async () => {
+  const id = $('#confirm').dataset.id;
+  if(!id){ showError(new Error("没有可确认的待处理建议")); return; }
+  try{
+    const operator = new FormData($('#pick')).get('operator') || "operator";
+    const result = await request(`/api/dosing/suggestions/${id}/confirm`, {method:"POST", body:JSON.stringify({operator})});
+    show(result);
+    await refreshAll();
+  }catch(e){ showError(e); await refreshAll(); }
+});
+
+$('#publish').addEventListener('submit', async e => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  try{
+    const body = {source:f.get('source'), stage:f.get('stage'), chemical:f.get('chemical'),
+      dose_per_cod:Number(f.get('dose')), sample_max_age_seconds:Number(f.get('maxage')),
+      min_rate:Number(f.get('minrate')), max_rate:Number(f.get('maxrate')), note:f.get('note')};
+    show(await request('/api/dosing/recipes', {method:"POST", body:JSON.stringify(body)}));
+    await loadRecipes();
+  }catch(err){ showError(err); }
+});
+
+refreshAll(); loadRecipes().catch(showError);
+</script>
+</body></html>

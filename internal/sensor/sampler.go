@@ -64,3 +64,15 @@ func (s *Sampler) LineSnapshot(lineID model.LineID) []model.Sample {
 	sort.Slice(result, func(i, j int) bool { return result[i].Kind < result[j].Kind })
 	return result
 }
+
+// Latest 返回指定线指定类型的最近一条样本。
+func (s *Sampler) Latest(lineID model.LineID, kind model.SampleKind) (model.Sample, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byKind := s.latest[lineID]
+	if byKind == nil {
+		return model.Sample{}, false
+	}
+	sample, ok := byKind[kind]
+	return sample, ok
+}

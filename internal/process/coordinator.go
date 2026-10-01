@@ -18,6 +18,7 @@ import (
 	"github.com/wyw14/cry-97/internal/journal"
 	"github.com/wyw14/cry-97/internal/lab"
 	"github.com/wyw14/cry-97/internal/model"
+	"github.com/wyw14/cry-97/internal/recipe"
 	"github.com/wyw14/cry-97/internal/sensor"
 	"github.com/wyw14/cry-97/internal/settling"
 	"github.com/wyw14/cry-97/internal/sludge"
@@ -35,6 +36,9 @@ type Plant struct {
 	equalizers    *intake.EqualizationPool
 	aeration      *aeration.Controller
 	dosing        *dosing.Service
+	recipes       *recipe.Book
+	recipeEngine  *recipe.Engine
+	suggestions   *recipe.Register
 	labResults    *lab.Results
 	permits       *discharge.PermitBook
 	valves        *discharge.ValveController
@@ -135,6 +139,11 @@ func NewPlant(dataDir string, lines []model.LineID, now func() time.Time) (*Plan
 	if err != nil {
 		return nil, err
 	}
+	recipeBook := recipe.NewBook()
+	recipeEngine, err := recipe.NewEngine(recipeBook)
+	if err != nil {
+		return nil, err
+	}
 	receiver, err := sensor.NewReceiver(store, cursor)
 	if err != nil {
 		return nil, err
@@ -144,6 +153,7 @@ func NewPlant(dataDir string, lines []model.LineID, now func() time.Time) (*Plan
 		now: now, lines: make(map[model.LineID]model.LineState), batches: make(map[uuid.UUID]model.Batch),
 		lineBatches: make(map[model.LineID]uuid.UUID), store: store, snapshots: snapshots,
 		intake: intakeController, equalizers: pool, aeration: aerationController, dosing: dosingService,
+		recipes: recipeBook, recipeEngine: recipeEngine, suggestions: recipe.NewRegister(),
 		labResults: lab.NewResults(), permits: permits, valves: valves, alarms: alarm.NewService(),
 		settling: make(map[model.LineID]*settling.State), cycles: settling.NewCycleBook(),
 		interlocks: arbiter, drains: drains, pumps: pumps, handovers: sludge.NewHandoverBook(),
