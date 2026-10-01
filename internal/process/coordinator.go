@@ -18,6 +18,7 @@ import (
 	"github.com/wyw14/cry-97/internal/journal"
 	"github.com/wyw14/cry-97/internal/lab"
 	"github.com/wyw14/cry-97/internal/model"
+	"github.com/wyw14/cry-97/internal/recipe"
 	"github.com/wyw14/cry-97/internal/sensor"
 	"github.com/wyw14/cry-97/internal/settling"
 	"github.com/wyw14/cry-97/internal/sludge"
@@ -25,6 +26,7 @@ import (
 
 type Plant struct {
 	mu            sync.RWMutex
+	decideMu      sync.Mutex
 	now           func() time.Time
 	lines         map[model.LineID]model.LineState
 	batches       map[uuid.UUID]model.Batch
@@ -50,6 +52,8 @@ type Plant struct {
 	devices       *DeviceBus
 	sampler       *sensor.Sampler
 	receiver      *sensor.Receiver
+	recipes       *recipe.Store
+	recommendBook *recipe.Book
 }
 
 func NewPlant(dataDir string, lines []model.LineID, now func() time.Time) (*Plant, error) {
@@ -148,6 +152,7 @@ func NewPlant(dataDir string, lines []model.LineID, now func() time.Time) (*Plan
 		settling: make(map[model.LineID]*settling.State), cycles: settling.NewCycleBook(),
 		interlocks: arbiter, drains: drains, pumps: pumps, handovers: sludge.NewHandoverBook(),
 		sequences: sequences, compensations: queue, devices: devices, sampler: sampler, receiver: receiver,
+		recipes: recipe.NewStore(), recommendBook: recipe.NewBook(),
 	}
 	for _, lineID := range lines {
 		plant.lines[lineID] = model.NewLineState(lineID, now())
